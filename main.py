@@ -1,135 +1,50 @@
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-import pyotp
+import os
 import requests
-import urllib.parse
+from flask import Flask, request, jsonify
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler
+import threading
+import asyncio
 
-# ==========================================
-# TELEGRAM BOT CONFIGURATION
-# ==========================================
-# আপনার বটের টোকেন
-BOT_TOKEN = "8712557966:AAEuLDVPRyTvLDmsx9uNvGgG7w04sAeeWBo"
-API_KEY_DONGVANFB = "36458879248967a36"
+app = Flask(__name__)
+BOT_TOKEN = os.environ.get("8344824887:AAEaVw4dj8A_v_RadPY_pb6U-rNwUAkZFqU")
+API_KEY = os.environ.get("YH6iIiq4AFTPT9UgXmvyEOs9amczOL84unCKB5bkjYdOS6qOTO")
+DOMAIN = os.environ.get("DOMAIN")
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
+bot = Bot(token=BOT_TOKEN)
 
-# ==========================================
-# HELPER FUNCTIONS
-# ==========================================
-def main_menu_keyboard():
-    markup = InlineKeyboardMarkup()
-    markup.row(
-        InlineKeyboardButton('🔐 2FA Code', callback_data='btn_2fa'),
-        InlineKeyboardButton('📧 Hot mail Code', callback_data='btn_hotmail')
-    )
-    markup.row(
-        InlineKeyboardButton('🌐 Temp Mail', url='https://temp-mail.asia/')
-    )
-    return markup
+@app.route('/payment-status')
+def status():
+    return "<h1>পেমেন্ট সফল!</h1>"
 
-def get_hotmail_otp(email):
-    url = f"https://api.dongvanfb.net/get_messages?apikey={API_KEY_DONGVANFB}&mail={urllib.parse.quote(email)}"
-    try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        return data.get('code', "Wait... / No Code Found")
-    except Exception as e:
-        return "Wait... / No Code Found"
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    data = request.json
+    if data.get("status") == "success":
+        user_id = data.get("metadata", {}).get("user_id")
+        asyncio.run(bot.send_message(chat_id=user_id, text="✅ পেমেন্ট সফল! ব্যালেন্স অ্যাড করা হয়েছে।"))
+    return jsonify({"status": "success"}), 200
 
-# ==========================================
-# MAIN BOT LOGIC
-# ==========================================
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.send_message(
-        message.chat.id, 
-        "<b>👋 স্বাগতম! মেনু থেকে যেকোনো একটি সিলেক্ট করুন:</b>", 
-        reply_markup=main_menu_keyboard()
-    )
+async def start(update, context):
+    payload = {
+        "success_url": f"{DOMAIN}/payment-status",
+        "cancel_url": f"{DOMAIN}/payment-status",
+        "webhook_url": f"{DOMAIN}/webhook",
+        "amount": "50",
+        "metadata": {"user_id": str(update.effective_user.id)}
+    }
+    headers = {'API-KEY': API_KEY, 'Content-Type': 'application/json'}
+    res = requests.post("https://secure-pay.nagorikpay.com/api/payment/create", json=payload, headers=headers)
+    data = res.json()
+    if "payment_url" in data:
+        keyboard = [[InlineKeyboardButton("Pay 50 BDT", url=data['payment_url'])]]
+        await update.message.reply_text("নিচের বাটনে ক্লিক করে পেমেন্ট করুন:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-@bot.callback_query_handler(func=lambda call: True)
-def handle_query(call):
-    chat_id = call.message.chat.id
-    message_id = call.message.message_id
+def run_bot():
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.run_polling()
 
-    if call.data == 'btn_2fa':
-        msg = bot.edit_message_text(
-            "<b>🔐 আপনার 2FA Key (Secret Key) দিন:</b>", 
-            chat_id, message_id
-        )
-        bot.register_next_step_handler(msg, process_2fa_step)
-
-    elif call.data == 'btn_hotmail':
-        msg = bot.edit_message_text(
-            "<b>📧 আপনার Hotmail Key / Email দিন:</b>", 
-            chat_id, message_id
-        )
-        bot.register_next_step_handler(msg, process_hotmail_step)
-
-    elif call.data == 'btn_back':
-        bot.edit_message_text(
-            "<b>👋 স্বাগতম! মেনু থেকে যেকোনো একটি সিলেক্ট করুন:</b>", 
-            chat_id, message_id, 
-            reply_markup=main_menu_keyboard()
-        )
-
-    elif call.data.startswith('ref_2fa|'):
-        secret = call.data.split('|')[1]
-        try:
-            totp = pyotp.TOTP(secret.replace(' ', '').upper())
-            otp = totp.now()
-            
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton('🔄 Refresh', callback_data=f'ref_2fa|{secret}'))
-            markup.row(InlineKeyboardButton('🔙 Back', callback_data='btn_back'))
-            
-            bot.edit_message_text(
-                f"<b>🔐 2FA Code:</b> <code>{otp}</code>", 
-                chat_id, message_id, 
-                reply_markup=markup
-            )
-        except Exception:
-            bot.answer_callback_query(call.id, "Invalid Key!")
-
-    elif call.data.startswith('ref_hot|'):
-        email = call.data.split('|')[1]
-        otp_code = get_hotmail_otp(email)
-        
-        text = f"<b>📧 Email:</b> <code>{email}</code>\n<b>🔑 OTP:</b> <code>{otp_code}</code>"
-        
-        markup = InlineKeyboardMarkup()
-        markup.row(InlineKeyboardButton('🔄 Refresh', callback_data=f'ref_hot|{email}'))
-        markup.row(InlineKeyboardButton('🔙 Back', callback_data='btn_back'))
-        
-        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
-
-# Next Step Handlers
-def process_2fa_step(message):
-    secret = message.text.strip()
-    try:
-        totp = pyotp.TOTP(secret.replace(' ', '').upper())
-        otp = totp.now()
-        
-        markup = InlineKeyboardMarkup()
-        markup.row(InlineKeyboardButton('🔄 Refresh', callback_data=f'ref_2fa|{secret}'))
-        markup.row(InlineKeyboardButton('🔙 Back', callback_data='btn_back'))
-        
-        bot.send_message(message.chat.id, f"<b>🔐 2FA Code:</b> <code>{otp}</code>", reply_markup=markup)
-    except Exception:
-        bot.send_message(message.chat.id, "❌ ভুল 2FA Key দিয়েছেন। আবার চেষ্টা করুন।")
-
-def process_hotmail_step(message):
-    email = message.text.strip().split('|')[0]
-    otp_code = get_hotmail_otp(email)
-    
-    text = f"<b>📧 Email:</b> <code>{email}</code>\n<b>🔑 OTP:</b> <code>{otp_code}</code>"
-    
-    markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton('🔄 Refresh', callback_data=f'ref_hot|{email}'))
-    markup.row(InlineKeyboardButton('🔙 Back', callback_data='btn_back'))
-    
-    bot.send_message(message.chat.id, text, reply_markup=markup)
-
-if __name__ == "__main__":
-    print("Bot is running...")
-    bot.infinity_polling()
+if __name__ == '__main__':
+    threading.Thread(target=run_bot).start()
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
